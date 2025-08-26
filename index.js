@@ -3,7 +3,8 @@ import cors from "cors";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { Pool } from "pg";
-import path from "path";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 const app = express();
 app.use(cors());
@@ -52,6 +53,7 @@ const subirImagen = async (file) => {
   }
 };
 
+// Obtener clientes (protegido)
 app.get("/clientes", async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM clientes ORDER BY fecha_registro DESC");
@@ -62,12 +64,13 @@ app.get("/clientes", async (req, res) => {
   }
 });
 
+// Registrar cliente (protegido)
 app.post("/clientes", upload.fields([
   { name: "foto_frente" }, { name: "foto_espalda" },
   { name: "foto_izquierda" }, { name: "foto_derecha" }
 ]), async (req, res) => {
   try {
-    const { nombre, correo, telefono, fecha_nacimiento, altura, altura_unidad, peso, peso_unidad, enfermedades, incapacidades, modalidad } = req.body;
+    const { nombre, correo, telefono, fecha_nacimiento, altura, altura_unidad, peso, peso_unidad, enfermedades, incapacidades, modalidad, precio, dias, estado } = req.body;
     if (!nombre || !correo || !telefono) return res.status(400).json({ error: "Nombre, correo y teléfono son obligatorios" });
 
     const files = req.files || {};
@@ -77,15 +80,32 @@ app.post("/clientes", upload.fields([
     const foto_derecha = await subirImagen(files.foto_derecha ? files.foto_derecha[0] : null);
 
     const result = await pool.query(
-      `INSERT INTO clientes
-       (nombre, correo, telefono, fecha_nacimiento, altura, altura_unidad, peso, peso_unidad,
-        enfermedades, incapacidades, modalidad, foto_frente, foto_espalda, foto_izquierda, foto_derecha)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-      [nombre, correo, telefono, fecha_nacimiento ? new Date(fecha_nacimiento) : null,
-       altura ? Number(altura) : null, altura_unidad || 'cm', peso ? Number(peso) : null,
-       peso_unidad || 'kg', enfermedades || null, incapacidades || null, modalidad || null,
-       foto_frente, foto_espalda, foto_izquierda, foto_derecha]
-    );
+  `INSERT INTO clientes
+   (nombre, correo, telefono, fecha_nacimiento, altura, altura_unidad, peso, peso_unidad,
+    enfermedades, incapacidades, modalidad, foto_frente, foto_espalda, foto_izquierda, foto_derecha, precio, dias, estado)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+  [
+    nombre, 
+    correo, 
+    telefono, 
+    fecha_nacimiento ? new Date(fecha_nacimiento) : null,
+    altura ? Number(altura) : null, 
+    altura_unidad || 'cm', 
+    peso ? Number(peso) : null,
+    peso_unidad || 'kg', 
+    enfermedades || null, 
+    incapacidades || null, 
+    modalidad || null,
+    foto_frente, 
+    foto_espalda, 
+    foto_izquierda, 
+    foto_derecha, 
+    precio ? Number(precio) : 0,        // Asegúrate de enviar 0 si viene vacío
+    dias ? Number(dias) : null,         // Convierte a número
+    estado || 'Pendiente'               // Valor por defecto
+  ]
+);
+
 
     res.status(201).json({ cliente: result.rows[0] });
   } catch (err) {
@@ -93,5 +113,67 @@ app.post("/clientes", upload.fields([
     res.status(500).json({ error: "Error al insertar cliente", details: err?.message || err });
   }
 });
+
+
+
+app.patch('/clientes/:id/estado', async (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body;
+
+  if (!['aceptada', 'rechazada'].includes(estado)) {
+    return res.status(400).json({ error: 'Estado inválido' });
+  }
+
+  try {
+    await pool.query('UPDATE clientes SET estado = $1 WHERE id = $2', [estado, id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al actualizar el estado' });
+  }
+});
+
+
+
+function signToken(payload) {
+  // Clave fija solo para desarrollo
+  const secret = "claveFijaParaDesarrollo123!";
+  return jwt.sign(payload, secret, { expiresIn: "1d" });
+}
+
+
+// ------------------- AUTH -------------------
+
+// POST /auth/login
+app.post("/auth/login", async (req, res) => {
+  const { usernameOrEmail, password } = req.body;
+  const { rows } = await pool.query(
+    `SELECT * FROM admin WHERE email=$1 OR username=$1 LIMIT 1`,
+    [usernameOrEmail]
+  );
+  const user = rows[0];
+  if (!user) return res.status(401).json({ error: "Credenciales inválidas" });
+
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) return res.status(401).json({ error: "Credenciales inválidas" });
+
+  const token = signToken({ sub: user.id, role: "admin" });
+  res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
+});
+
+
+function verificarToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1]; // formato "Bearer TOKEN"
+
+  if (!token) return res.status(403).json({ error: "Token requerido" });
+
+  jwt.verify(token, process.env.JWT_SECRET || "default_secret", (err, user) => {
+    if (err) return res.status(403).json({ error: "Token inválido o expirado" });
+    req.user = user;
+    next();
+  });
+}
+
 
 app.listen(3000, () => console.log("API corriendo en http://localhost:3000"));
