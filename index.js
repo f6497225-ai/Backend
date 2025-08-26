@@ -8,6 +8,7 @@ import jwt from "jsonwebtoken";
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 app.use(express.json({ limit: '10mb' }));
 
 const storage = multer.memoryStorage();
@@ -114,6 +115,36 @@ app.post("/clientes", upload.fields([
   }
 });
 
+
+app.delete("/clientes/:id", async (req, res) => {
+  
+  const { id } = req.params;
+
+  try {
+    // Primero obtenemos las URLs de las fotos para eliminar en Supabase (opcional)
+    const { rows } = await pool.query("SELECT foto_frente, foto_espalda, foto_izquierda, foto_derecha FROM clientes WHERE id=$1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "Cliente no encontrado" });
+
+    const fotos = rows[0];
+
+    // Borrar imágenes de Supabase
+    for (const key of ["foto_frente","foto_espalda","foto_izquierda","foto_derecha"]) {
+      if (fotos[key]) {
+        // Obtener el path del archivo en Supabase (supone que está en el bucket "up")
+        const filePath = fotos[key].split("/").pop();
+        const { error } = await supabase.storage.from("up").remove([filePath]);
+        if (error) console.warn(`Error eliminando ${key}:`, error);
+      }
+    }
+
+    // Borrar cliente de la DB
+    await pool.query("DELETE FROM clientes WHERE id=$1", [id]);
+    res.json({ success: true, message: "Cliente eliminado correctamente" });
+  } catch (error) {
+    console.error("Error eliminando cliente:", error);
+    res.status(500).json({ error: "Error eliminando cliente", details: error.message });
+  }
+});
 
 
 app.patch('/clientes/:id/estado', async (req, res) => {
